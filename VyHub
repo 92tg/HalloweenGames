@@ -7,7 +7,7 @@ end
 local K, V, G, UI, F = {}, {}, {}, {}, {}
 
 K.TAG = "[VY HalloweenGames] "
-K.VERSION = "1.5.5"
+K.VERSION = "1.6.0"
 K.INSTANCE_ID = "HalloweenGames"
 K.CURRENCY = "HalloweenGamesCoins"
 K.TREATS = "HalloweenGamesTreats"
@@ -1553,6 +1553,40 @@ local function useTrick(key, why)
     R.pendingTricks[key] = why or ""
     return true
 end
+local function sendTrick(key, why)
+    if trickCount(key) <= 0 then return false end
+    V.g.lastTrick = os.clock()
+    if fireTrick(key) then
+        state.tricksUsed += 1
+        log("used %s (%s)", key, tostring(why))
+        return true
+    end
+    warnlog("could not send the %s trick", key)
+    return false
+end
+local function trickPolicy(st)
+    if not (F.autoTricks and st and st.phase == "play") then return end
+    if os.clock() - (V.g.lastTrick or 0) < 2.5 then return end
+    local night = tonumber(st.number)
+    local nightId = tostring(st.nightId)
+    V.g.trickNight = V.g.trickNight or {}
+    local mem = V.g.trickNight[nightId]
+    if not mem then
+        mem = { magnet = false, charmActive = false }
+        V.g.trickNight = { [nightId] = mem }
+    end
+    if F.trickEnabled.TreatMagnet and night == 3 and not mem.magnet then
+        mem.magnet = true
+        if sendTrick("TreatMagnet", "Night 3") then return end
+    end
+    if F.trickEnabled.Lantern and night == 2 and trickCount("Lantern") > 0 then
+        if sendTrick("Lantern", "Night 2, every Flashlight") then return end
+    end
+    local kind = type(st.config) == "table" and st.config.Kind or nil
+    if F.trickEnabled.LuckyCharm and (kind == "elimination" or kind == "final" or kind == "survival") and not mem.charmActive then
+        if sendTrick("LuckyCharm", "kept active before an elimination") then mem.charmActive = true return end
+    end
+end
 local function flushTricks()
     if not (R.pendingTricks and next(R.pendingTricks)) then return end
     if os.clock() - (V.g.lastTrick or 0) < 1.2 then return end
@@ -1659,7 +1693,6 @@ H.TombstoneBridge = {
         if ev == "start" then
             R.progress = R.progress or 0
             R.rowSince = os.clock()
-            useTrick("LuckyCharm", "bridge start")
         elseif ev == "progress" then
             R.progress = tonumber(d.row) or R.progress
             R.rowSince = os.clock()
@@ -1791,7 +1824,7 @@ H.TombstoneBridge = {
         if not lane then
 
             if waited > 1.5 and not R.lanternAsked then
-                R.lanternAsked = useTrick("Lantern", "row " .. nextRow .. " unknown") and os.clock() or false
+                R.lanternAsked = os.clock()
             end
             local mustMove = R.mustMoveBy and serverNow() >= R.mustMoveBy - 0.5
             if mustMove then
@@ -1835,7 +1868,6 @@ H.TombstoneBridge = {
 
 H.MonsterMash = {
     onEvent = function(ev, d)
-        if ev == "scramble" then useTrick("LuckyCharm", "monster mash") end
         if ev == "reveal" or ev == "scramble" then
             R.group = tonumber(d.groupSize) or R.group
             R.crypts = type(d.crypts) == "table" and d.crypts or R.crypts
@@ -1920,7 +1952,6 @@ H.HotPumpkin = {
         R.holders = R.holders or {}
         if ev == "light" then
             R.holders[d.k] = d.holder
-            useTrick("LuckyCharm", "hot pumpkin")
         elseif ev == "pass" then R.holders[d.k] = d.to
         elseif ev == "pop" then R.holders[d.k] = nil
         elseif ev == "over" then R.over = true end
@@ -1990,13 +2021,11 @@ H.TrickOrTreatDoors = {
             R.bad = {}
             R.committed = false
             R.phase = "wave"
-            useTrick("LuckyCharm", "doors")
         elseif ev == "SniffHint" or ev == "lantern" then
             if d.doorId then R.bad[tonumber(d.doorId)] = true end
         elseif ev == "pick" then
             R.phase = "pick"
             R.pickAt = os.clock()
-            useTrick("Lantern", "doors pick")
         elseif ev == "DoorRevealed" then
             if d.result == "trick" and d.doorId then R.bad = R.bad or {} R.bad[tonumber(d.doorId)] = true end
         elseif ev == "committed" then
@@ -2160,10 +2189,20 @@ H.CoffinChairs = {
             if os.clock() - (R.lastClaim or 0) > 0.35 then
                 R.lastClaim = os.clock()
                 R.claimTarget = best.id
-                teleportTo(s + Vector3.new(0, 1.5, 0))
-                task.wait(0.08)
+                local h = humanoid()
+                local seat = best.seat
+                if seat and seat:IsA("Seat") and h then
+                    teleportTo(seat.Position + Vector3.new(0, 2, 0))
+                    pcall(seat.Sit, seat, h)
+                else
+                    local cf = (seat and seat:IsA("BasePart")) and seat.CFrame or CFrame.new(s)
+                    local c = LocalPlayer.Character
+                    if c then pcall(function() c:PivotTo(cf + Vector3.new(0, 1, 0)) end) end
+                    if h then h.Sit = true end
+                end
+                task.wait(0.1)
                 nightInput("claim", { coffin = best.id })
-                state.gamesNote = "Coffin Chairs: claiming coffin " .. best.id
+                state.gamesNote = "Coffin Chairs: sitting in coffin " .. best.id
             end
         elseif R.phase == "promenade" or R.phase == "arrival" then
 
@@ -2269,7 +2308,6 @@ H.CandyRain = {
         local me = (nightState() or {}).me
         if ev == "setup" then
             R.reach = tonumber(d.reach) or 6
-            useTrick("TreatMagnet", "candy rain")
         elseif ev == "batch" then
             for _, c in ipairs(d.d or {}) do
                 if type(c) == "table" and c.o == me and c.i ~= nil then R.candy[c.i] = { pos = Vector3.new(c.x, c.y, c.z), k = c.k } end
@@ -2303,9 +2341,6 @@ H.CandyRain = {
     end,
 }
 
-H.EggToss = { onEvent = function(ev) if ev == "setup" then useTrick("TreatMagnet", "egg toss") end end }
-H.TrickOrTreatRun = { onEvent = function(ev) if ev == "setup" then useTrick("TreatMagnet", "trick or treat run") end end }
-H.PetHideAndSeek = { onEvent = function(ev) if ev == "setup" then useTrick("TreatMagnet", "hide and seek") end end }
 
 local function resetRound(roundId)
     V.g.round = roundId
@@ -2333,6 +2368,13 @@ local function installRoundEventListener()
     track(signal:Connect(function(instanceId, name, a, b, c, d)
         if name == "HG_Round" then
             onRoundEvent(a, b, c, d)
+        elseif name == "HG_Night" and a == "saved" and type(b) == "table" then
+            local st = nightState()
+            if st and b.id == st.me and V.g.trickNight then
+                local mem = V.g.trickNight[tostring(st.nightId)]
+                if mem then mem.charmActive = false end
+                log("Lucky Charm saved you (%s)", tostring(b.by))
+            end
         elseif name == "HG_Night" and a == "circle" and type(b) == "table" then
             V.g.circle = { phase = b.phase, nights = b.nights, night = b.night, at = os.clock() }
         end
@@ -2912,6 +2954,7 @@ loop("gameround", K.GAME_TICK, function()
     local me = nightMe()
     if st.out == true or (type(me) == "table" and (me.Alive == false or me.Ghost == true)) then return end
     flushTricks()
+    trickPolicy(st)
     local h = H[V.g.round]
     if h and type(h.tick) == "function" then h.tick() end
 end)
