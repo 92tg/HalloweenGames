@@ -7,7 +7,7 @@ end
 local K, V, G, UI, F = {}, {}, {}, {}, {}
 
 K.TAG = "[VY HalloweenGames] "
-K.VERSION = "1.6.0"
+K.VERSION = "1.6.4"
 K.INSTANCE_ID = "HalloweenGames"
 K.CURRENCY = "HalloweenGamesCoins"
 K.TREATS = "HalloweenGamesTreats"
@@ -1624,6 +1624,26 @@ local function setControls(enabled)
     V.g.controlsOff = enabled == false
 end
 
+local function atStoneEdge(p, flatDir)
+    local arena = arenaModel()
+    local bridge = arena and arena:FindFirstChild("Bridge")
+    if not bridge then return false end
+    local best, bestD
+    for _, rowModel in ipairs(bridge:GetChildren()) do
+        for l = 1, 2 do
+            local st = rowModel:FindFirstChild("Stone" .. l)
+            local sp = st and partPos(st)
+            if sp then
+                local d = Vector3.new(p.X - sp.X, 0, p.Z - sp.Z).Magnitude
+                if d < 7.5 and (not bestD or d < bestD) then best, bestD = { pos = sp, size = (st:IsA("BasePart") and st.Size or Vector3.new(10, 1, 10)) }, d end
+            end
+        end
+    end
+    if not best then return false end
+    local along = (p - best.pos):Dot(flatDir)
+    local half = math.min(best.size.X, best.size.Z) / 2
+    return along >= half - 1.2
+end
 local function edgeAhead(p, flatDir)
     local params = RaycastParams.new()
     params.FilterType = Enum.RaycastFilterType.Exclude
@@ -1652,6 +1672,36 @@ local function goHome(why)
 end
 
 K.GAME_TICK = 0.12
+K.ROUND_LOG = "VYHUB/HG_Rounds.log"
+V.roundLogLines = 0
+local function roundLog(fmt, ...)
+    local ok, msg = pcall(string.format, fmt, ...)
+    local line = os.date("%H:%M:%S") .. " " .. (ok and msg or tostring(fmt)) .. "\n"
+    pcall(function()
+        if type(makefolder) == "function" and type(isfolder) == "function" and not isfolder("VYHUB") then makefolder("VYHUB") end
+        V.roundLogLines += 1
+        if V.roundLogLines == 1 or (type(isfile) == "function" and not isfile(K.ROUND_LOG)) then
+            writefile(K.ROUND_LOG, line)
+        elseif type(appendfile) == "function" then
+            appendfile(K.ROUND_LOG, line)
+        else
+            writefile(K.ROUND_LOG, readfile(K.ROUND_LOG) .. line)
+        end
+    end)
+end
+V.roundLog = roundLog
+local function compact(v, depth)
+    depth = depth or 0
+    if type(v) ~= "table" then return tostring(v) end
+    if depth > 1 then return "{..}" end
+    local parts, n = {}, 0
+    for k, x in pairs(v) do
+        n += 1
+        if n > 12 then parts[#parts + 1] = "..." break end
+        parts[#parts + 1] = tostring(k) .. "=" .. compact(x, depth + 1)
+    end
+    return "{" .. table.concat(parts, ",") .. "}"
+end
 local H = {}
 
 H.ScarecrowStare = {
@@ -1714,6 +1764,9 @@ H.TombstoneBridge = {
                     R.mustMoveBy = ev == "Collapse" and (serverNow() + 0.4) or (at or (serverNow() + 1.5))
                 end
             end
+        elseif ev == "caught" and d.id and d.id ~= me then
+            R.dead = R.dead or {}
+            R.dead[tonumber(d.id) or d.id] = true
         elseif ev == "Finished" and d.id == me then
             R.done = true
         end
@@ -1743,10 +1796,11 @@ H.TombstoneBridge = {
                 flatDir = flatDir.Magnitude > 0.1 and flatDir.Unit or Vector3.new(0, 0, -1)
                 R.endSince = R.endSince or os.clock()
                 local stale = os.clock() - R.endSince > 2 and os.clock() - (R.lastJump or 0) > 2
-                if h and h.FloorMaterial ~= Enum.Material.Air and os.clock() - (R.lastJump or 0) > 0.7 and (edgeAhead(p, flatDir) or stale) then
+                if h and h.FloorMaterial ~= Enum.Material.Air and os.clock() - (R.lastJump or 0) > 0.7 and (atStoneEdge(p, flatDir) or edgeAhead(p, flatDir) or stale) then
                     R.lastJump = os.clock()
                     R.endSince = os.clock()
                     h.Jump = true
+                    roundLog("bridge jump to the end platform (%s)", stale and "stale" or "edge")
                 end
             end
             state.gamesNote = "Tombstone Bridge: walking to the end"
@@ -1757,22 +1811,47 @@ H.TombstoneBridge = {
         R.lastOn = R.lastOn or {}
         local now = os.clock()
         local roots = {}
-        for _, plr in ipairs(Players:GetPlayers()) do
-            if plr ~= LocalPlayer then
-                local root = plr.Character and plr.Character:FindFirstChild("HumanoidRootPart")
-                if root then roots[#roots + 1] = { key = "p" .. plr.UserId, pos = root.Position } end
+        local contestants = isfn(G.HGNight, "Contestants") and gval(G.HGNight.Contestants) or nil
+        local deadUsers = {}
+        R.dead = R.dead or {}
+        for id, c in pairs(type(contestants) == "table" and contestants or {}) do
+            if type(c) == "table" then
+                if not R.fieldsLogged then
+                    R.fieldsLogged = true
+                    roundLog("contestant record %s", compact(c))
+                end
+                local uid = tonumber(c.UserId or c.userId or c.User or c.Player)
+                if c.Alive == false or c.Ghost == true or R.dead[id] then
+                    if uid then deadUsers[uid] = true end
+                    if type(c.Name) == "string" then deadUsers[c.Name] = true end
+                end
             end
         end
-        local contestants = isfn(G.HGNight, "Contestants") and gval(G.HGNight.Contestants) or nil
+        for _, plr in ipairs(Players:GetPlayers()) do
+            if plr ~= LocalPlayer and not deadUsers[plr.UserId] and not deadUsers[plr.Name] then
+                local root = plr.Character and plr.Character:FindFirstChild("HumanoidRootPart")
+                local hum = plr.Character and plr.Character:FindFirstChildOfClass("Humanoid")
+                if root and not (hum and hum.Health <= 0) then roots[#roots + 1] = { key = "p" .. plr.UserId, pos = root.Position } end
+            end
+        end
         for id in pairs(type(contestants) == "table" and contestants or {}) do
-            if type(id) == "number" and id < 0 then
+            if type(id) == "number" and id < 0 and not R.dead[id] then
                 local root = contestantRoot(id)
                 if root then roots[#roots + 1] = { key = "b" .. id, pos = root.Position } end
             end
         end
+        local endP = arena:FindFirstChild("EndPlatform")
+        local endPos = partPos(endP)
+        local endSize = (endP and endP:IsA("BasePart")) and endP.Size or Vector3.new(27, 1, 29)
         local function stoneAt(rp)
             for r = math.max(1, nextRow - 1), nextRow + 5 do
                 local rowModel = bridge:FindFirstChild("Row" .. r)
+                if not rowModel then
+                    if endPos and math.abs(rp.X - endPos.X) <= endSize.X / 2 and math.abs(rp.Z - endPos.Z) <= endSize.Z / 2 then
+                        return r, 0, endPos
+                    end
+                    break
+                end
                 for l = 1, 2 do
                     local sp = rowModel and partPos(rowModel:FindFirstChild("Stone" .. l))
                     if sp and math.abs(rp.X - sp.X) <= 4.5 and math.abs(rp.Z - sp.Z) <= 4.5 then
@@ -1786,6 +1865,7 @@ H.TombstoneBridge = {
             if not R.known[r] then
                 R.known[r] = l
                 log("Tombstone Bridge: row %d lane %d is safe (%s)", r, l, why)
+                roundLog("bridge: row %d lane %d safe (%s)", r, l, why)
             end
         end
         local function markBad(r, l, why)
@@ -1793,6 +1873,7 @@ H.TombstoneBridge = {
             if R.known[r] ~= other then
                 R.known[r] = other
                 log("Tombstone Bridge: row %d lane %d is bad (%s), taking lane %d", r, l, why, other)
+                roundLog("bridge: row %d lane %d bad (%s)", r, l, why)
             end
         end
         for _, e in ipairs(roots) do
@@ -1801,13 +1882,21 @@ H.TombstoneBridge = {
                 local dy = e.pos.Y - sp.Y
                 if dy < -2 then
                     markBad(r, l, "someone fell through it")
-                elseif dy > 0 and dy < 8 then
+                elseif dy > 1.5 and dy < 5.5 then
                     local last = R.lastOn[e.key]
-                    if last and last.row == r - 1 and r - 1 >= 1 then markSafe(last.row, last.lane, "someone crossed it") end
-                    if not last or last.row ~= r or last.lane ~= l then R.lastOn[e.key] = { row = r, lane = l, since = now } end
-                    local key = r .. ":" .. l
-                    R.seen[key] = R.seen[key] or now
-                    if now - R.seen[key] >= 3 then markSafe(r, l, "someone stood on it for 3 s") end
+                    if last and last.row == r - 1 and r - 1 >= 1 and last.lane > 0 and now - last.since >= 0.25 and last.samples >= 2 then
+                        markSafe(last.row, last.lane, string.format("%s stood %.1fs on it then %s", e.key, now - last.since, l == 0 and "reached the end" or "crossed"))
+                    end
+                    if not last or last.row ~= r or last.lane ~= l then
+                        R.lastOn[e.key] = { row = r, lane = l, since = now, samples = 1 }
+                    else
+                        last.samples += 1
+                    end
+                    if l > 0 then
+                        local key = r .. ":" .. l
+                        R.seen[key] = R.seen[key] or now
+                        if now - R.seen[key] >= 3 then markSafe(r, l, e.key .. " stood on it for 3 s") end
+                    end
                 end
             end
         end
@@ -1855,12 +1944,12 @@ H.TombstoneBridge = {
         local flatDir = Vector3.new(pos.X - p.X, 0, pos.Z - p.Z)
         flatDir = flatDir.Magnitude > 0.1 and flatDir.Unit or Vector3.new(0, 0, -1)
         local grounded = h and h.FloorMaterial ~= Enum.Material.Air
-
-        local stale = os.clock() - (R.stepSince or os.clock()) > 2 and os.clock() - (R.lastJump or 0) > 2
-        if h and grounded and flat > 1.5 and os.clock() - (R.lastJump or 0) > 0.7 and (edgeAhead(p, flatDir) or stale) then
+        local stale = os.clock() - (R.stepSince or os.clock()) > 2.5 and os.clock() - (R.lastJump or 0) > 2
+        if h and grounded and flat > 1.5 and os.clock() - (R.lastJump or 0) > 0.7 and (atStoneEdge(p, flatDir) or edgeAhead(p, flatDir) or stale) then
             R.lastJump = os.clock()
             R.stepSince = os.clock()
             h.Jump = true
+            roundLog("bridge jump to row %d lane %d (%s)", nextRow, lane, stale and "stale" or "edge")
         end
         state.gamesNote = string.format("Tombstone Bridge: row %d lane %d, %s", nextRow, lane, flat > 1.5 and (grounded and "walking" or "in the air") or "on the stone")
     end,
@@ -2123,19 +2212,39 @@ H.CoffinChairs = {
         R.taken = R.taken or {}
         if ev == "arrival" or ev == "promenade" then
             R.phase = ev
+            R.seated = false
+            R.claimTarget = nil
+            R.claimTries = 0
+            R.soon = nil
+            R.opened = nil
+            R.taken = {}
             if type(d.active) == "table" then
                 R.active = {}
                 for _, id in ipairs(d.active) do R.active[tonumber(id)] = true end
             end
-        elseif ev == "flicker" then R.flicker = tonumber(d.coffin)
+        elseif ev == "flicker" then
+            if type(d.coffins) == "table" then
+                R.soon = {}
+                for _, id in pairs(d.coffins) do if tonumber(id) then R.soon[tonumber(id)] = true end end
+            end
+            R.flicker = tonumber(d.coffin)
         elseif ev == "stop" then
             R.phase = "claim"
             if d.removed then R.active[tonumber(d.removed)] = nil end
+            if type(d.opened) == "table" then
+                R.opened = {}
+                for _, id in pairs(d.opened) do if tonumber(id) then R.opened[tonumber(id)] = true end end
+            end
             R.flicker = nil
             R.claimTarget = nil
+            R.claimTries = 0
+            R.lastClaim = 0
+            if type(H.CoffinChairs.tick) == "function" then pcall(H.CoffinChairs.tick) end
         elseif ev == "lock" then
             R.taken[tonumber(d.coffin)] = d.id
-            if d.id == (nightState() or {}).me then R.seated = true setControls(true) end
+            if d.id == (nightState() or {}).me then R.seated = true setControls(true) roundLog("coffin %s LOCKED for me", tostring(d.coffin)) end
+        elseif ev == "still" then
+            R.stills = (R.stills or 0) + 1
         elseif ev == "taken" then
             if R.claimTarget then R.taken[R.claimTarget] = true end
             R.claimTarget = nil
@@ -2172,10 +2281,32 @@ H.CoffinChairs = {
             if R.active and next(R.active) ~= nil and not R.active[c.id] then return false end
             if R.taken and R.taken[c.id] then return false end
             if c.id == R.flicker then return false end
-            return isOpen(c)
+            if R.phase == "claim" then
+                if R.opened and next(R.opened) ~= nil then return R.opened[c.id] == true end
+                return isOpen(c)
+            end
+            if R.soon and next(R.soon) ~= nil then return R.soon[c.id] == true end
+            return true
+        end
+        local function ringCenter()
+            if R.center then return R.center, R.radius end
+            local sum, n, far = Vector3.zero, 0, 0
+            for _, c in ipairs(coffins) do
+                local sp = spot(c)
+                if sp then sum += sp n += 1 end
+            end
+            if n == 0 then return nil end
+            local center = sum / n
+            for _, c in ipairs(coffins) do
+                local sp = spot(c)
+                if sp then far = math.max(far, Vector3.new(sp.X - center.X, 0, sp.Z - center.Z).Magnitude) end
+            end
+            R.center, R.radius = center, math.max(far, 8)
+            return center, R.radius
         end
         setControls(false)
-        if R.phase == "claim" and not R.seated then
+        local rushing = R.phase ~= "claim" and R.soon ~= nil and next(R.soon) ~= nil
+        if (R.phase == "claim" or rushing) and not R.seated then
             local best, bestD
             for _, c in ipairs(coffins) do
                 if usable(c) then
@@ -2186,43 +2317,64 @@ H.CoffinChairs = {
             end
             if not best then state.gamesNote = "Coffin Chairs: no open coffin left" return end
             local s = spot(best)
-            if os.clock() - (R.lastClaim or 0) > 0.35 then
+            if os.clock() - (R.lastClaim or 0) > 0.2 then
                 R.lastClaim = os.clock()
+                R.claimTries = (R.claimTarget == best.id) and (R.claimTries or 0) + 1 or 1
                 R.claimTarget = best.id
                 local h = humanoid()
                 local seat = best.seat
-                if seat and seat:IsA("Seat") and h then
+                local c = LocalPlayer.Character
+                local standing = R.claimTries % 2 == 0 and not rushing
+                if standing then
+                    if h then h.Sit = false end
+                    teleportTo(s + Vector3.new(0, 2.5, 0))
+                elseif seat and seat:IsA("Seat") and h then
                     teleportTo(seat.Position + Vector3.new(0, 2, 0))
                     pcall(seat.Sit, seat, h)
                 else
                     local cf = (seat and seat:IsA("BasePart")) and seat.CFrame or CFrame.new(s)
-                    local c = LocalPlayer.Character
                     if c then pcall(function() c:PivotTo(cf + Vector3.new(0, 1, 0)) end) end
                     if h then h.Sit = true end
                 end
                 task.wait(0.1)
                 nightInput("claim", { coffin = best.id })
-                state.gamesNote = "Coffin Chairs: sitting in coffin " .. best.id
+                local root = hrp()
+                roundLog("coffin claim %d try %d (%s%s) me=%s seat=%s dist=%.1f", best.id, R.claimTries, standing and "standing" or "seated", rushing and ", early" or "", root and tostring(root.Position) or "?", tostring(s), root and dist(root.Position, s) or -1)
+                state.gamesNote = string.format("Coffin Chairs: claiming coffin %d (try %d)", best.id, R.claimTries)
             end
         elseif R.phase == "promenade" or R.phase == "arrival" then
-
-            local best, bestD
-            for _, c in ipairs(coffins) do
-                if usable(c) then
-                    local s = spot(c)
-                    local d = s and dist(s, p) or math.huge
-                    if s and (not bestD or d < bestD) then best, bestD = c, d end
+            local center, radius = ringCenter()
+            if not center then return end
+            local soon
+            if R.soon and next(R.soon) ~= nil then
+                local bestD
+                for _, c in ipairs(coffins) do
+                    if R.soon[c.id] and usable(c) then
+                        local sp = spot(c)
+                        local d = sp and dist(sp, p) or math.huge
+                        if sp and (not bestD or d < bestD) then soon, bestD = c, d end
+                    end
                 end
             end
-            if best and os.clock() - (R.lastWalk or 0) > 0.6 then
-                R.lastWalk = os.clock()
-                R.walkFlip = not R.walkFlip
-                local s = spot(best)
-                local side = R.walkFlip and 4 or -4
-                if bestD > 10 then teleportTo(s + Vector3.new(side, 1, 4)) end
-                moveTo(Vector3.new(s.X + side, p.Y, s.Z + 4))
-                state.gamesNote = "Coffin Chairs: pacing next to coffin " .. best.id
+            R.angle = R.angle or math.atan2(p.Z - center.Z, p.X - center.X)
+            local target
+            if soon then
+                local sp = spot(soon)
+                local toC = Vector3.new(center.X - sp.X, 0, center.Z - sp.Z)
+                toC = toC.Magnitude > 0.1 and toC.Unit or Vector3.new(0, 0, 1)
+                local side = Vector3.new(-toC.Z, 0, toC.X)
+                R.orbit = R.orbit or 0
+                target = sp + toC * 4 + side * (3 * math.sin(R.orbit))
+                if dist(Vector3.new(target.X, p.Y, target.Z), p) < 2 then R.orbit += 1.6 end
+                state.gamesNote = "Coffin Chairs: circling coffin " .. soon.id
+            else
+                local r = radius * 0.6
+                target = Vector3.new(center.X + math.cos(R.angle) * r, p.Y, center.Z + math.sin(R.angle) * r)
+                if dist(Vector3.new(target.X, p.Y, target.Z), p) < 3 then R.angle += 0.5 end
+                state.gamesNote = "Coffin Chairs: walking the ring"
             end
+            if dist(Vector3.new(target.X, p.Y, target.Z), p) > 45 then teleportTo(target + Vector3.new(0, 2, 0)) end
+            moveTo(Vector3.new(target.X, p.Y, target.Z))
         end
     end,
 }
@@ -2350,7 +2502,10 @@ local function resetRound(roundId)
 end
 local function onRoundEvent(roundId, event, data, t)
     if not (state.alive and F.autoGames) then return end
-    if roundId ~= V.g.round then resetRound(roundId) end
+    if roundId ~= V.g.round then resetRound(roundId) roundLog("== round %s me=%s", tostring(roundId), tostring((nightState() or {}).me)) end
+    if roundId == "TombstoneBridge" or roundId == "CoffinChairs" or roundId == "MonsterMash" then
+        roundLog("%s %s %s", tostring(roundId), tostring(event), typeof(data) == "buffer" and "<buffer>" or compact(data))
+    end
     local h = H[roundId]
     if h and type(h.onEvent) == "function" then
         local okE, err = pcall(h.onEvent, event, type(data) == "table" and data or {}, t)
