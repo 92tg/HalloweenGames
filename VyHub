@@ -7,7 +7,7 @@ end
 local K, V, G, UI, F = {}, {}, {}, {}, {}
 
 K.TAG = "[VY HalloweenGames] "
-K.VERSION = "1.6.4"
+K.VERSION = "1.6.6"
 K.INSTANCE_ID = "HalloweenGames"
 K.CURRENCY = "HalloweenGamesCoins"
 K.TREATS = "HalloweenGamesTreats"
@@ -1740,9 +1740,14 @@ H.TombstoneBridge = {
     onEvent = function(ev, d)
         R.known = R.known or {}
         local me = (nightState() or {}).me
-        if ev == "start" then
-            R.progress = R.progress or 0
-            R.rowSince = os.clock()
+        if ev == "warmup" or ev == "start" then
+            if tonumber(d.endsAt) then R.endsAt = tonumber(d.endsAt) end
+            if tonumber(d.rows) then R.rows = tonumber(d.rows) end
+            if ev == "start" then
+                R.progress = R.progress or 0
+                R.rowSince = os.clock()
+                roundLog("bridge: I am contestant %s, %d rows, %.0fs on the clock", tostring(me), R.rows or 12, R.endsAt and (R.endsAt - serverNow()) or -1)
+            end
         elseif ev == "progress" then
             R.progress = tonumber(d.row) or R.progress
             R.rowSince = os.clock()
@@ -1895,7 +1900,7 @@ H.TombstoneBridge = {
                     if l > 0 then
                         local key = r .. ":" .. l
                         R.seen[key] = R.seen[key] or now
-                        if now - R.seen[key] >= 3 then markSafe(r, l, e.key .. " stood on it for 3 s") end
+                        if now - R.seen[key] >= 1.5 then markSafe(r, l, e.key .. " stood on it for 1.5 s") end
                     end
                 end
             end
@@ -1916,10 +1921,25 @@ H.TombstoneBridge = {
                 R.lanternAsked = os.clock()
             end
             local mustMove = R.mustMoveBy and serverNow() >= R.mustMoveBy - 0.5
-            if mustMove then
-                lane = math.random(1, 2)
+            local left = R.endsAt and (R.endsAt - serverNow()) or math.huge
+            local rowsLeft = math.max(1, (R.rows or 12) - (R.progress or 0) + 1)
+            local standingLane, standingFor
+            for l = 1, 2 do
+                local t = R.seen[nextRow .. ":" .. l]
+                if t and (not standingFor or now - t > standingFor) then standingLane, standingFor = l, now - t end
+            end
+            local hurry = left < rowsLeft * 2.5
+            local behind = waited > left / rowsLeft and left < 30
+            if mustMove or hurry then
+                lane = (standingLane and standingFor >= 0.4) and standingLane or math.random(1, 2)
                 R.known[nextRow] = lane
-                log("Tombstone Bridge: row %d still unknown and our row is falling, taking lane %d", nextRow, lane)
+                local why = mustMove and "our row is falling" or string.format("%.0fs left for %d rows", left, rowsLeft)
+                log("Tombstone Bridge: row %d still unknown, %s, taking lane %d", nextRow, why, lane)
+                roundLog("bridge: row %d lane %d gamble (%s%s)", nextRow, lane, why, standingLane == lane and ", someone stands there" or "")
+            elseif behind and standingLane and standingFor >= 0.8 then
+                lane = standingLane
+                R.known[nextRow] = lane
+                roundLog("bridge: row %d lane %d taken early (%.0fs left, %s stood %.1fs)", nextRow, lane, left, "someone", standingFor)
             else
                 state.gamesNote = string.format("Tombstone Bridge: row %d, waiting to see the safe stone (%ds)", nextRow, math.floor(waited))
                 return
@@ -3097,7 +3117,7 @@ loop("webhook", 2, webhookTick)
 
 loop("games", 0.5, gamesTick)
 loop("reexec", 5, function()
-    if F.autoGames and state.alive then
+    if (F.autoGames or (F.autoQueue and placeKind() ~= "world")) and state.alive then
         queueReexec()
         saveResume("games")
     end
