@@ -7,7 +7,7 @@ end
 local K, V, G, UI, F = {}, {}, {}, {}, {}
 
 K.TAG = "[VY HalloweenGames] "
-K.VERSION = "1.6.6"
+K.VERSION = "1.6.7"
 K.INSTANCE_ID = "HalloweenGames"
 K.CURRENCY = "HalloweenGamesCoins"
 K.TREATS = "HalloweenGamesTreats"
@@ -1624,26 +1624,6 @@ local function setControls(enabled)
     V.g.controlsOff = enabled == false
 end
 
-local function atStoneEdge(p, flatDir)
-    local arena = arenaModel()
-    local bridge = arena and arena:FindFirstChild("Bridge")
-    if not bridge then return false end
-    local best, bestD
-    for _, rowModel in ipairs(bridge:GetChildren()) do
-        for l = 1, 2 do
-            local st = rowModel:FindFirstChild("Stone" .. l)
-            local sp = st and partPos(st)
-            if sp then
-                local d = Vector3.new(p.X - sp.X, 0, p.Z - sp.Z).Magnitude
-                if d < 7.5 and (not bestD or d < bestD) then best, bestD = { pos = sp, size = (st:IsA("BasePart") and st.Size or Vector3.new(10, 1, 10)) }, d end
-            end
-        end
-    end
-    if not best then return false end
-    local along = (p - best.pos):Dot(flatDir)
-    local half = math.min(best.size.X, best.size.Z) / 2
-    return along >= half - 1.2
-end
 local function edgeAhead(p, flatDir)
     local params = RaycastParams.new()
     params.FilterType = Enum.RaycastFilterType.Exclude
@@ -1702,6 +1682,84 @@ local function compact(v, depth)
     end
     return "{" .. table.concat(parts, ",") .. "}"
 end
+local function boxOf(part)
+    local pos = partPos(part)
+    if not pos then return nil end
+    return { pos = pos, size = part:IsA("BasePart") and part.Size or Vector3.new(10, 1, 10) }
+end
+local function inBox(p, box, margin)
+    return math.abs(p.X - box.pos.X) <= box.size.X / 2 + margin and math.abs(p.Z - box.pos.Z) <= box.size.Z / 2 + margin
+end
+local function clampToBox(v, box, inset)
+    local hx, hz = math.max(0, box.size.X / 2 - inset), math.max(0, box.size.Z / 2 - inset)
+    return Vector3.new(math.clamp(v.X, box.pos.X - hx, box.pos.X + hx), v.Y, math.clamp(v.Z, box.pos.Z - hz, box.pos.Z + hz))
+end
+local function bridgeSupport(arena, p)
+    local bridge = arena:FindFirstChild("Bridge")
+    for _, rowModel in ipairs(bridge and bridge:GetChildren() or {}) do
+        for l = 1, 2 do
+            local stone = rowModel:FindFirstChild("Stone" .. l)
+            local box = stone and boxOf(stone)
+            if box and inBox(p, box, 0.5) and p.Y > box.pos.Y then return box end
+        end
+    end
+    for _, name in ipairs({ "StartPlatform", "EndPlatform" }) do
+        local plat = arena:FindFirstChild(name)
+        local box = plat and boxOf(plat)
+        if box and inBox(p, box, 0.5) and p.Y > box.pos.Y then return box end
+    end
+    return nil
+end
+local function jumpReach(h)
+    local g = workspace.Gravity
+    local vy = h.UseJumpPower and h.JumpPower or math.sqrt(2 * g * h.JumpHeight)
+    return h.WalkSpeed * 2 * vy / g
+end
+local function ensureHopWatcher()
+    if R.hopConn then return end
+    local mine = R
+    local conn
+    conn = RunService.Heartbeat:Connect(function()
+        if R ~= mine or not state.alive then
+            conn:Disconnect()
+            return
+        end
+        local hop = R.hop
+        if not hop or R.done or not hop.wp then return end
+        local h, r = humanoid(), hrp()
+        if not (h and r) or h.FloorMaterial == Enum.Material.Air then return end
+        if os.clock() - (R.lastJump or 0) < 0.6 then return end
+        local dx, dz = r.Position.X - hop.wp.X, r.Position.Z - hop.wp.Z
+        if dx * dx + dz * dz <= 0.36 then
+            R.lastJump = os.clock()
+            R.stepSince = os.clock()
+            moveTo(hop.target)
+            h.Jump = true
+            roundLog("bridge jump to %s (edge, walk %s, reach %.1f, gap %.1f)", hop.label, tostring(h.WalkSpeed), jumpReach(h), (Vector3.new(r.Position.X, 0, r.Position.Z) - Vector3.new(hop.nearest.X, 0, hop.nearest.Z)).Magnitude)
+        end
+    end)
+    track(conn)
+    R.hopConn = conn
+end
+local function hopToward(h, p, arena, box, aim, label)
+    ensureHopWatcher()
+    local flatAim = Vector3.new(aim.X, p.Y, aim.Z)
+    if not h or h.FloorMaterial == Enum.Material.Air then
+        R.hop = nil
+        moveTo(flatAim)
+        return
+    end
+    local support = bridgeSupport(arena, p)
+    if not support or support.pos == box.pos then
+        R.hop = nil
+        moveTo(flatAim)
+        return support ~= nil
+    end
+    local wp = clampToBox(flatAim, support, 0.3)
+    R.hop = { wp = wp, target = flatAim, nearest = clampToBox(wp, box, 0), label = label }
+    moveTo(wp)
+    return true
+end
 local H = {}
 
 H.ScarecrowStare = {
@@ -1709,6 +1767,7 @@ H.ScarecrowStare = {
         if ev == "light" then
             R.light = d.state
             R.go = d.state == "green"
+            R.lightId = (R.lightId or 0) + 1
             if d.state == "over" then R.done = true end
         elseif ev == "finished" and d.id == (nightState() or {}).me then
             R.done = true
@@ -1717,17 +1776,43 @@ H.ScarecrowStare = {
     tick = function()
         if R.done then stopMoving() setControls(true) return end
         local arena = arenaModel()
-        local wall = arena and arena:FindFirstChild("FinishWall", true)
+        local wall = partPos(arena and arena:FindFirstChild("FinishWall", true))
         local p = playerPos()
-        if not (wall and p) then return end
+        if not (wall and p) then
+            logOnce("stare-nowall", "Scarecrow Stare: no finish wall or character yet (arena %s)", tostring(arena))
+            return
+        end
+        if not R.light then
+            local gui = LocalPlayer:FindFirstChild("PlayerGui")
+            gui = gui and gui:FindFirstChild("ScarecrowStareCall")
+            local label = gui and gui.Enabled and gui:FindFirstChildWhichIsA("TextLabel", true)
+            if label and label.Text == "Walk to the Scarecrow!" then
+                R.light, R.go = "green", true
+                roundLog("ScarecrowStare: joined mid round, the screen says green")
+            elseif label and label.Text == "Freeze!" then
+                R.light, R.go = "red", false
+                roundLog("ScarecrowStare: joined mid round, the screen says red")
+            end
+        end
         if R.go and R.light == "green" then
 
             setControls(false)
             R.startPos = R.startPos or p
-            local dir = Vector3.new(wall.Position.X - R.startPos.X, 0, wall.Position.Z - R.startPos.Z)
+            local dir = Vector3.new(wall.X - R.startPos.X, 0, wall.Z - R.startPos.Z)
             dir = dir.Magnitude > 0.1 and dir.Unit or Vector3.new(0, 0, -1)
-            local target = Vector3.new(wall.Position.X, p.Y, wall.Position.Z) + dir * 4
+            local target = Vector3.new(wall.X, p.Y, wall.Z) + dir * 4
             moveTo(target)
+            if not R.moveCheck or R.moveCheck.light ~= R.lightId then
+                R.moveCheck = { light = R.lightId, at = os.clock(), pos = p }
+            elseif os.clock() - R.moveCheck.at > 1.5 then
+                if dist(p, R.moveCheck.pos) < 1 then
+                    local h = humanoid()
+                    local root = hrp()
+                    if h then pcall(h.Move, h, dir, false) end
+                    roundLog("ScarecrowStare: not moving on green (walk %s, anchored %s, sitting %s, state %s), pushing with Move", h and tostring(h.WalkSpeed) or "?", root and tostring(root.Anchored) or "?", h and tostring(h.Sit) or "?", h and tostring(h:GetState()) or "?")
+                end
+                R.moveCheck = { light = R.lightId, at = os.clock(), pos = p }
+            end
             state.gamesNote = string.format("Scarecrow Stare: green, running (%d studs to go)", math.floor(dist(p, target)))
         else
             stopMoving()
@@ -1795,13 +1880,13 @@ H.TombstoneBridge = {
                 local toward = Vector3.new(0, 0, (p.Z > pos.Z) and 1 or -1)
                 local target = Vector3.new(pos.X, p.Y, pos.Z) + toward * math.max(0, size.Z / 2 - 5)
                 setControls(false)
-                moveTo(target)
                 local h = humanoid()
+                local known = hopToward(h, p, arena, boxOf(endP), target, "the end platform")
                 local flatDir = Vector3.new(target.X - p.X, 0, target.Z - p.Z)
                 flatDir = flatDir.Magnitude > 0.1 and flatDir.Unit or Vector3.new(0, 0, -1)
                 R.endSince = R.endSince or os.clock()
                 local stale = os.clock() - R.endSince > 2 and os.clock() - (R.lastJump or 0) > 2
-                if h and h.FloorMaterial ~= Enum.Material.Air and os.clock() - (R.lastJump or 0) > 0.7 and (atStoneEdge(p, flatDir) or edgeAhead(p, flatDir) or stale) then
+                if h and h.FloorMaterial ~= Enum.Material.Air and os.clock() - (R.lastJump or 0) > 0.7 and ((known == false and edgeAhead(p, flatDir)) or stale) then
                     R.lastJump = os.clock()
                     R.endSince = os.clock()
                     h.Jump = true
@@ -1942,6 +2027,7 @@ H.TombstoneBridge = {
                 roundLog("bridge: row %d lane %d taken early (%.0fs left, %s stood %.1fs)", nextRow, lane, left, "someone", standingFor)
             else
                 state.gamesNote = string.format("Tombstone Bridge: row %d, waiting to see the safe stone (%ds)", nextRow, math.floor(waited))
+                R.hop = nil
                 return
             end
         end
@@ -1959,13 +2045,13 @@ H.TombstoneBridge = {
             R.stepSince = os.clock()
             R.jumped = false
         end
-        moveTo(target)
+        local known = hopToward(h, p, arena, boxOf(stone), target, string.format("row %d lane %d", nextRow, lane))
 
         local flatDir = Vector3.new(pos.X - p.X, 0, pos.Z - p.Z)
         flatDir = flatDir.Magnitude > 0.1 and flatDir.Unit or Vector3.new(0, 0, -1)
         local grounded = h and h.FloorMaterial ~= Enum.Material.Air
         local stale = os.clock() - (R.stepSince or os.clock()) > 2.5 and os.clock() - (R.lastJump or 0) > 2
-        if h and grounded and flat > 1.5 and os.clock() - (R.lastJump or 0) > 0.7 and (atStoneEdge(p, flatDir) or edgeAhead(p, flatDir) or stale) then
+        if h and grounded and flat > 1.5 and os.clock() - (R.lastJump or 0) > 0.7 and ((known == false and edgeAhead(p, flatDir)) or stale) then
             R.lastJump = os.clock()
             R.stepSince = os.clock()
             h.Jump = true
@@ -2516,6 +2602,7 @@ H.CandyRain = {
 
 local function resetRound(roundId)
     V.g.round = roundId
+    V.g.roundAt = os.clock()
     R = {}
     V.g.enabledFor = nil
     setControls(true)
@@ -2523,7 +2610,7 @@ end
 local function onRoundEvent(roundId, event, data, t)
     if not (state.alive and F.autoGames) then return end
     if roundId ~= V.g.round then resetRound(roundId) roundLog("== round %s me=%s", tostring(roundId), tostring((nightState() or {}).me)) end
-    if roundId == "TombstoneBridge" or roundId == "CoffinChairs" or roundId == "MonsterMash" then
+    if roundId == "TombstoneBridge" or roundId == "CoffinChairs" or roundId == "MonsterMash" or roundId == "ScarecrowStare" then
         roundLog("%s %s %s", tostring(roundId), tostring(event), typeof(data) == "buffer" and "<buffer>" or compact(data))
     end
     local h = H[roundId]
@@ -3123,9 +3210,14 @@ loop("reexec", 5, function()
     end
 end)
 loop("gameround", K.GAME_TICK, function()
-    if not (F.autoGames and V.g.round and state.excursion == "games") then return end
+    if not (F.autoGames and state.excursion == "games") then return end
     local st = nightState()
     if not (st and st.phase == "play") then return end
+    if st.roundId and st.roundId ~= V.g.round and os.clock() - (V.g.roundAt or 0) > 3 then
+        resetRound(st.roundId)
+        roundLog("== round %s me=%s (picked up mid round)", tostring(st.roundId), tostring(st.me))
+    end
+    if not V.g.round then return end
     local me = nightMe()
     if st.out == true or (type(me) == "table" and (me.Alive == false or me.Ghost == true)) then return end
     flushTricks()
