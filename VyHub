@@ -7,7 +7,7 @@ end
 local K, V, G, UI, F = {}, {}, {}, {}, {}
 
 K.TAG = "[VY HalloweenGames] "
-K.VERSION = "1.6.7"
+K.VERSION = "1.6.8"
 K.INSTANCE_ID = "HalloweenGames"
 K.CURRENCY = "HalloweenGamesCoins"
 K.TREATS = "HalloweenGamesTreats"
@@ -2013,7 +2013,7 @@ H.TombstoneBridge = {
                 local t = R.seen[nextRow .. ":" .. l]
                 if t and (not standingFor or now - t > standingFor) then standingLane, standingFor = l, now - t end
             end
-            local hurry = left < rowsLeft * 2.5
+            local hurry = left < rowsLeft * 1.2 + 1
             local behind = waited > left / rowsLeft and left < 30
             if mustMove or hurry then
                 lane = (standingLane and standingFor >= 0.4) and standingLane or math.random(1, 2)
